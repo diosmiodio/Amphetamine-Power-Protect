@@ -39,14 +39,23 @@ installed. Then, from the repository folder:
 sudo zsh Source/Helper/install.zsh
 ```
 
+The script installs `powerProtect.scpt` for the user who is logged in at the screen. A
+standard account cannot use `sudo`. To install for a standard account, log in as that
+user, open Terminal, and run the command with `su`:
+
+```sh
+su ADMIN_NAME -c "sudo zsh $PWD/Source/Helper/install.zsh --user $USER"
+```
+
 The script:
 
 1. Compiles `Source/powerProtect.applescript`. If compilation fails, the script stops
    before it changes anything.
 2. Installs the helper and the LaunchDaemon, then loads it.
 3. Sends `status` to the helper as your user and checks the reply.
-4. Saves your current `powerProtect.scpt` as `powerProtect.scpt.orig` (first install
-   only), then installs the new script.
+4. Saves the current `powerProtect.scpt` as `powerProtect.scpt.orig` (first install
+   only), then installs the new script. It does these steps as the target user, not as
+   root.
 
 Quit and open Amphetamine again. Then start a new Closed-Display Mode session.
 
@@ -65,6 +74,7 @@ log show --last 1h --predicate 'eventMessage CONTAINS "AmphetaminePowerProtect"'
 ```sh
 sudo zsh Source/Helper/uninstall.zsh                    # keep the new script
 sudo zsh Source/Helper/uninstall.zsh --restore-script   # also restore the old script
+                                                        # (add --user NAME for another account)
 ```
 
 Uninstall unloads the helper, removes its files, and runs `pmset -a disablesleep 0`, so
@@ -74,8 +84,9 @@ normal sleep is on again.
 
 - Any local user can connect to the socket and turn sleep on or off. This is the same
   access as a sudoers rule for all users. The helper cannot do anything else.
-- The helper does not read files or environment values that a user controls. launchd
-  starts it with a fixed environment.
+- The helper reads at most 64 bytes, waits at most 5 seconds, and exits. It does not read
+  files or environment values that a user controls. launchd starts it with a fixed
+  environment.
 - If you only need sleep control for administrators and the sudoers rule works on your
   Mac, you do not need the helper.
 

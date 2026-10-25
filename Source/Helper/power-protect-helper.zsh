@@ -40,8 +40,12 @@ sleep_disabled() {
 	fi
 }
 
+# One read(2) of at most 64 bytes, with a 5 second limit. "read -t" only limits the wait for
+# the first byte, so a client could keep this root process alive by sending a partial line.
+zmodload zsh/system
 request=""
-IFS= read -r -t 5 request
+sysread -t 5 -s 64 -i 0 request
+request=${request%%$'\n'*}
 request=${request%$'\r'}
 
 case $request in

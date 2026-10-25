@@ -3,9 +3,12 @@
 
 -- PATHS ARE PROPERTIES SO THAT TESTS CAN REPLACE THEM WITH STUBS
 property helperSocket : "/var/run/com.if.Amphetamine.PowerProtectHelper.sock"
+property helperProgram : "/Library/PrivilegedHelperTools/com.if.Amphetamine.PowerProtectHelper"
 property sudoersFile : "/etc/sudoers.d/amphetamine_PowerProtect"
 property pmsetPath : "/usr/bin/pmset"
 property sudoPath : "/usr/bin/sudo"
+property idPath : "/usr/bin/id"
+property loggerPath : "/usr/bin/logger"
 
 -- ENABLE/DISABLE POWER PROTECT
 -- ENABLING POWER PROTECT MEANS DISABLING SLEEP WHEN THE MAC'S BUILT-IN DISPLAY IS CLOSED
@@ -23,21 +26,23 @@ on enableDisablePowerProtect(inputString)
 	if sleepDisabledState() is targetState then return "success"
 
 	-- METHOD 1: THE POWER PROTECT HELPER (A LAUNCHDAEMON). IT DOES NOT USE SUDO
-	set helperIsInstalled to helperInstalled()
-	if helperIsInstalled then
+	if helperSocketExists() then
 		if helperRequest(inputString) is targetState then return "success"
 		logMessage(inputString & ": helper did not set SleepDisabled to " & targetState)
 	end if
 
 	-- METHOD 2: SUDO WITH THE NOPASSWD RULE. -n MAKES SUDO FAIL IMMEDIATELY IF THE RULE DOES NOT APPLY
 	-- WITHOUT -n, SUDO TRIES TO READ A PASSWORD WITH NO TERMINAL AND FAILS
-	try
-		do shell script quoted form of sudoPath & " -n " & quoted form of pmsetPath & " -a disablesleep " & targetState
-	end try
-	if sleepDisabledState() is targetState then return "success"
+	-- ONLY TRY IF THE RULE CAN EXIST: SUDO REPORTS EVERY ATTEMPT BY A USER WHO IS NOT IN SUDOERS
+	if sudoersFileInstalled() or userIsAdmin() then
+		try
+			do shell script quoted form of sudoPath & " -n " & quoted form of pmsetPath & " -a disablesleep " & targetState
+		end try
+		if sleepDisabledState() is targetState then return "success"
+	end if
 
 	-- RETURN SUCCESS IF NO METHOD IS INSTALLED, OTHERWISE AMPHETAMINE WILL NOTIFY THE USER OF THE FAILURE
-	if not helperIsInstalled and not sudoersFileInstalled() then
+	if not powerProtectSudoFileExists() then
 		logMessage(inputString & ": no helper and no sudoers file, nothing changed")
 		return "success"
 	end if
@@ -50,22 +55,8 @@ end enableDisablePowerProtect
 -- INSTALL THE CONFIGURATION FILE TO MAKE POWER PROTECT AUTHENTICATION-LESS
 on installPowerProtectSudoOverride(inputString)
 
-	set ruleText to sudoersRuleText(short user name of (system info))
-
-	-- WRITE TO A TEMPORARY FILE, CHECK THE SYNTAX WITH VISUDO, THEN INSTALL IT AS root:wheel 0440
-	-- A SUDOERS FILE WITH BAD SYNTAX CAN STOP SUDO FROM WORKING, SO NEVER INSTALL A FILE THAT VISUDO REJECTS
-	-- THE LAST STEP CHECKS THAT /etc/sudoers INCLUDES THE NEW FILE. SOME MANAGED MACS DO NOT INCLUDE /etc/sudoers.d
-	set installCommand to "set -e
-tmp=$(/usr/bin/mktemp /tmp/amphetamine_PowerProtect.XXXXXX)
-trap '/bin/rm -f \"$tmp\"' EXIT
-/usr/bin/printf '%s' " & quoted form of ruleText & " > \"$tmp\"
-/usr/sbin/visudo -c -q -f \"$tmp\"
-/bin/mkdir -p /private/etc/sudoers.d
-/usr/bin/install -S -o root -g wheel -m 0440 \"$tmp\" " & quoted form of sudoersFile & "
-/usr/sbin/visudo -c 2>&1 | /usr/bin/grep -q amphetamine_PowerProtect"
-
 	try
-		do shell script installCommand with administrator privileges
+		do shell script sudoersInstallCommand(sudoersRuleText(short user name of (system info))) with administrator privileges
 		return "success"
 	on error errorMessage
 		logMessage("install sudoers file failed: " & errorMessage)
@@ -78,17 +69,41 @@ end installPowerProtectSudoOverride
 -- TRUE IF THE HELPER OR THE SUDOERS FILE IS INSTALLED
 on powerProtectSudoFileExists()
 
-	return helperInstalled() or sudoersFileInstalled()
+	return helperSocketExists() or helperProgramExists() or sudoersFileInstalled()
 
 end powerProtectSudoFileExists
 
+
+-- SHELL COMMAND THAT INSTALLS THE SUDOERS FILE. IT RUNS AS ROOT
+-- 1. WRITE THE RULE TO A TEMPORARY FILE AND CHECK ITS SYNTAX WITH VISUDO
+-- 2. INSTALL IT AS root:wheel 0440, AND KEEP A COPY OF THE FILE IT REPLACES
+-- 3. CHECK THAT THE WHOLE SUDOERS CONFIGURATION STILL PARSES AND THAT SUDO READS THE NEW FILE
+--    SOME MANAGED MACS DO NOT INCLUDE /etc/sudoers.d. IF A CHECK FAILS, PUT BACK THE OLD FILE
+-- A SUDOERS FILE WITH BAD SYNTAX CAN STOP SUDO FROM WORKING, SO NEVER LEAVE ONE INSTALLED
+on sudoersInstallCommand(ruleText)
+
+	return "set -e
+dest=" & quoted form of sudoersFile & "
+work=$(/usr/bin/mktemp -d /tmp/amphetamine_PowerProtect.XXXXXX)
+trap '/bin/rm -rf \"$work\"' EXIT
+/usr/bin/printf '%s' " & quoted form of ruleText & " > \"$work/rule\"
+/usr/sbin/visudo -c -q -f \"$work/rule\"
+/bin/mkdir -p /private/etc/sudoers.d
+if [ -f \"$dest\" ]; then /bin/cp -p \"$dest\" \"$work/previous\"; fi
+/usr/bin/install -S -o root -g wheel -m 0440 \"$work/rule\" \"$dest\"
+if /usr/sbin/visudo -c -q && /usr/sbin/visudo -c 2>&1 | /usr/bin/grep -qF \"${dest##*/}: parsed OK\"; then exit 0; fi
+if [ -f \"$work/previous\" ]; then /bin/mv -f \"$work/previous\" \"$dest\"; else /bin/rm -f \"$dest\"; fi
+echo \"sudo does not use $dest. /etc/sudoers may not include /etc/sudoers.d. Use the Power Protect helper.\" >&2
+exit 1"
+
+end sudoersInstallCommand
 
 -- RETURN "1" IF SLEEP IS DISABLED, "0" IF SLEEP IS ENABLED, "unknown" IF PMSET FAILS
 -- PMSET DOES NOT SHOW SLEEPDISABLED WHEN IT IS 0
 on sleepDisabledState()
 
 	try
-		set pmsetResult to do shell script quoted form of pmsetPath & " -g | /usr/bin/awk '/SleepDisabled/ { print $2; exit }'"
+		set pmsetResult to do shell script "settings=$(" & quoted form of pmsetPath & " -g) || exit 1; /usr/bin/printf '%s\\n' \"$settings\" | /usr/bin/awk '/SleepDisabled/ { print $2; exit }'"
 	on error
 		return "unknown"
 	end try
@@ -98,7 +113,7 @@ on sleepDisabledState()
 
 end sleepDisabledState
 
-on helperInstalled()
+on helperSocketExists()
 
 	try
 		do shell script "/bin/test -S " & quoted form of helperSocket
@@ -107,7 +122,29 @@ on helperInstalled()
 		return false
 	end try
 
-end helperInstalled
+end helperSocketExists
+
+on helperProgramExists()
+
+	try
+		do shell script "/bin/test -e " & quoted form of helperProgram
+		return true
+	on error
+		return false
+	end try
+
+end helperProgramExists
+
+on userIsAdmin()
+
+	try
+		do shell script quoted form of idPath & " -Gn | /usr/bin/grep -qw admin"
+		return true
+	on error
+		return false
+	end try
+
+end userIsAdmin
 
 -- SEND A REQUEST TO THE HELPER. RETURN THE SLEEPDISABLED VALUE THAT THE HELPER REPORTS, OR "" IF IT FAILS
 on helperRequest(requestString)
@@ -164,7 +201,7 @@ end isSafeUserName
 on logMessage(messageText)
 
 	try
-		do shell script "/usr/bin/logger -t AmphetaminePowerProtect -- " & quoted form of ("AmphetaminePowerProtect: script: " & messageText)
+		do shell script quoted form of loggerPath & " -t AmphetaminePowerProtect -- " & quoted form of ("AmphetaminePowerProtect: script: " & messageText)
 	end try
 
 end logMessage

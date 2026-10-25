@@ -81,7 +81,7 @@ EOF
 cat > $T/id <<EOF
 #!/bin/sh
 [ "\$1" = -Gn ] || exit 1
-if [ -f $T/is-admin ]; then echo "staff everyone admin"; else echo "staff everyone"; fi
+if [ -f $T/is-admin ]; then echo "staff everyone admin"; else echo "staff everyone it-admin"; fi
 EOF
 chmod 755 $T/pmset $T/sudo $T/logger $T/id
 
@@ -226,6 +226,9 @@ check "script enable with sudo rule outside sudoers.d (admin)" success "$(as_cal
 reset_state 0; touch $T/sudo-allowed
 check "script enable, standard user, no sudoers file" success "$(as_call $enable_call)"
 check "script does not run sudo for a standard user with no sudoers file" no "$([[ -f $T/sudo-calls ]] && print yes || print no)"
+check "a group named it-admin does not make the user an admin" false "$(as_call 'userIsAdmin()')"
+touch $T/is-admin
+check "the admin group makes the user an admin" true "$(as_call 'userIsAdmin()')"
 
 # Helper installed but broken: a stale socket file with no listener. Fall back to sudo.
 /usr/bin/python3 -I -c "import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])" $T/stale.sock
@@ -285,18 +288,45 @@ run_sudoers_install() {
 	print -r -- "root ALL=(ALL) ALL" > $tree/main
 	[[ $1 == include ]] && print -r -- "#includedir $tree/sd" >> $tree/main
 	chmod 0440 $tree/main
-	as_call 'sudoersInstallCommand(sudoersRuleText("first.last"))' "" $tree/sd/amphetamine_PowerProtect | sed \
-		-e "s|/usr/sbin/visudo -c -q \&\&|/usr/sbin/visudo -c -q -f $tree/main \&\&|" \
-		-e "s|/usr/sbin/visudo -c 2>|/usr/sbin/visudo -c -f $tree/main 2>|" \
+	as_call 'sudoersInstallCommand(sudoersRuleText("first.last"), "first.last")' "" $tree/sd/amphetamine_PowerProtect | sed \
+		-e "s|/usr/sbin/visudo -c -f /private/etc/sudoers|/usr/sbin/visudo -c -f $tree/main|" \
+		-e "s|/usr/bin/pmset -g|$T/pmset -g|" \
+		-e "s|/usr/bin/sudo -u \"\$user\" /usr/bin/sudo -n /usr/bin/pmset|$T/rule-check|" \
 		-e "s|-o root -g wheel ||" \
 		-e "s|/bin/mkdir -p /private/etc/sudoers.d|/bin/mkdir -p $tree/sd|" > $T/install-command.sh
-	/bin/sh $T/install-command.sh >/dev/null 2>&1
+	if grep -nE '/private/etc|/usr/bin/sudo |/usr/bin/pmset -g' $T/install-command.sh; then
+		print -u2 "sudoers install test command still has a system path"
+		exit 1
+	fi
+	/bin/sh $T/install-command.sh >/dev/null 2>$T/install-command-err
 }
+# Stands in for "sudo -u USER sudo -n pmset ...": the rule applies unless $T/rule-denied exists.
+cat > $T/rule-check <<EOF
+#!/bin/sh
+echo "\$*" >> $T/rule-check-calls
+[ ! -f $T/rule-denied ]
+EOF
+chmod 755 $T/rule-check
 SD=$T/sudoers-tree/sd
 mkdir -p $SD
 
+reset_state 1
 run_sudoers_install include; check "sudoers install succeeds when sudoers.d is included" 0 $?
 check "sudoers install leaves mode 0440" 440 "$(stat -f %Lp $SD/amphetamine_PowerProtect 2>/dev/null)"
+check "sudoers install tests the rule with the current value" "-a disablesleep 1" "$(tail -1 $T/rule-check-calls)"
+
+# Another file at 0644 works with sudo. Plain "visudo -c" rejects it, the install must not.
+rm -f $SD/*(N)
+print -r -- "# other tool" > $SD/othertool; chmod 0644 $SD/othertool
+run_sudoers_install include; check "sudoers install ignores the mode of other files" 0 $?
+rm -f $SD/othertool
+
+# A later sudoers entry asks for a password: the file is read, but the rule does not apply.
+rm -f $SD/*(N); touch $T/rule-denied
+run_sudoers_install include; check "sudoers install fails when the rule does not apply" 1 $?
+check "sudoers install removes a rule that does not apply" no "$([[ -e $SD/amphetamine_PowerProtect ]] && print yes || print no)"
+check "sudoers install says why" 1 "$(grep -c 'does not apply to first.last' $T/install-command-err)"
+rm -f $T/rule-denied
 
 rm -f $SD/*(N)
 run_sudoers_install no-include; check "sudoers install fails when sudoers.d is not included" 1 $?
@@ -322,6 +352,7 @@ check "sudoers install rolls back a file that breaks the configuration" no "$([[
 ME=$(/usr/bin/id -un)
 R=$T/root
 HOME_SCRIPTS="$T/home/Library/Application Scripts/com.if.Amphetamine"
+export TEST_SOCKET=$SOCK
 cat > $T/launchctl <<EOF
 #!/bin/sh
 echo "\$1" >> $T/launchctl-calls
@@ -373,7 +404,8 @@ TEST_SOCKET=$SOCK zsh $T/install-dry.zsh --user $ME >/dev/null 2>&1; check "inst
 check "install did not write through the link" no "$([[ -e /tmp/pp-should-not-exist ]] && print yes || print no)"
 rm -f "$HOME_SCRIPTS/powerProtect.scpt.orig"; mv $T/orig-saved "$HOME_SCRIPTS/powerProtect.scpt.orig"
 
-zsh $T/install-dry.zsh --user no_such_user_pp >/dev/null 2>&1; check "install rejects an unknown user" 1 $?
+zsh $T/install-dry.zsh --user no_such_user_pp >/dev/null 2>$T/install-err; check "install rejects an unknown user" 1 $?
+check "install says the user is unknown" 1 "$(grep -c 'no such user' $T/install-err)"
 
 reset_state 1
 TEST_SOCKET=$SOCK zsh $T/uninstall-dry.zsh --restore-script --user $ME >/dev/null 2>&1; check "uninstall succeeds" 0 $?
@@ -381,7 +413,8 @@ check "uninstall removes the helper" no "$([[ -e $R/PrivilegedHelperTools/com.if
 check "uninstall removes the plist" no "$([[ -e $R/LaunchDaemons/com.if.Amphetamine.PowerProtectHelper.plist ]] && print yes || print no)"
 check "uninstall turns normal sleep back on" 0 "$(cat $T/state)"
 check "uninstall restores the original script" upstream "$(cat "$HOME_SCRIPTS/powerProtect.scpt")"
-zsh $T/uninstall-dry.zsh --restore-script --user $ME >/dev/null 2>&1; check "uninstall --restore-script fails with no backup" 1 $?
+zsh $T/uninstall-dry.zsh --restore-script --user $ME >/dev/null 2>$T/uninstall-err; check "uninstall --restore-script fails with no backup" 1 $?
+check "uninstall says there is no backup" 1 "$(grep -c 'no backup at' $T/uninstall-err)"
 
 print
 print "$pass passed, $fail failed"

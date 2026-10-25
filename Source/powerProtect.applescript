@@ -56,7 +56,8 @@ end enableDisablePowerProtect
 on installPowerProtectSudoOverride(inputString)
 
 	try
-		do shell script sudoersInstallCommand(sudoersRuleText(short user name of (system info))) with administrator privileges
+		set userName to short user name of (system info)
+		do shell script sudoersInstallCommand(sudoersRuleText(userName), userName) with administrator privileges
 		return "success"
 	on error errorMessage
 		logMessage("install sudoers file failed: " & errorMessage)
@@ -78,12 +79,16 @@ end powerProtectSudoFileExists
 -- 1. WRITE THE RULE TO A TEMPORARY FILE AND CHECK ITS SYNTAX WITH VISUDO
 -- 2. INSTALL IT AS root:wheel 0440, AND KEEP A COPY OF THE FILE IT REPLACES
 -- 3. CHECK THAT THE WHOLE SUDOERS CONFIGURATION STILL PARSES AND THAT SUDO READS THE NEW FILE
---    SOME MANAGED MACS DO NOT INCLUDE /etc/sudoers.d. IF A CHECK FAILS, PUT BACK THE OLD FILE
--- A SUDOERS FILE WITH BAD SYNTAX CAN STOP SUDO FROM WORKING, SO NEVER LEAVE ONE INSTALLED
-on sudoersInstallCommand(ruleText)
+--    (SOME MANAGED MACS DO NOT INCLUDE /etc/sudoers.d). visudo -f SKIPS THE OWNER AND MODE CHECKS THAT
+--    PLAIN "visudo -c" DOES ON EVERY FILE: SUDO ACCEPTS ROOT-OWNED 0644 FILES THAT OTHER TOOLS INSTALL
+-- 4. RUN THE REAL COMMAND AS THE USER WITH THE CURRENT VALUE, SO NOTHING CHANGES. A LATER SUDOERS
+--    ENTRY CAN STILL ASK FOR A PASSWORD, BECAUSE THE LAST MATCHING ENTRY WINS
+-- IF A CHECK FAILS, PUT BACK THE OLD FILE. A SUDOERS FILE WITH BAD SYNTAX CAN STOP SUDO FROM WORKING
+on sudoersInstallCommand(ruleText, userName)
 
 	return "set -e
 dest=" & quoted form of sudoersFile & "
+user=" & quoted form of userName & "
 work=$(/usr/bin/mktemp -d /tmp/amphetamine_PowerProtect.XXXXXX)
 trap '/bin/rm -rf \"$work\"' EXIT
 /usr/bin/printf '%s' " & quoted form of ruleText & " > \"$work/rule\"
@@ -91,9 +96,19 @@ trap '/bin/rm -rf \"$work\"' EXIT
 /bin/mkdir -p /private/etc/sudoers.d
 if [ -f \"$dest\" ]; then /bin/cp -p \"$dest\" \"$work/previous\"; fi
 /usr/bin/install -S -o root -g wheel -m 0440 \"$work/rule\" \"$dest\"
-if /usr/sbin/visudo -c -q && /usr/sbin/visudo -c 2>&1 | /usr/bin/grep -qF \"${dest##*/}: parsed OK\"; then exit 0; fi
+reason=\"sudo does not read $dest. /etc/sudoers may not include /etc/sudoers.d.\"
+if parsed=$(/usr/sbin/visudo -c -f /private/etc/sudoers 2>&1); then
+	if /usr/bin/printf '%s\\n' \"$parsed\" | /usr/bin/grep -qF \"${dest##*/}: parsed OK\"; then
+		current=$(/usr/bin/pmset -g | /usr/bin/awk '/SleepDisabled/ { print $2; exit }')
+		[ \"$current\" = 1 ] || current=0
+		if /usr/bin/sudo -u \"$user\" /usr/bin/sudo -n /usr/bin/pmset -a disablesleep \"$current\" 2>/dev/null; then exit 0; fi
+		reason=\"the rule does not apply to $user. Another sudoers entry may ask for a password.\"
+	fi
+else
+	reason=\"the sudoers configuration does not parse: $parsed\"
+fi
 if [ -f \"$work/previous\" ]; then /bin/mv -f \"$work/previous\" \"$dest\"; else /bin/rm -f \"$dest\"; fi
-echo \"sudo does not use $dest. /etc/sudoers may not include /etc/sudoers.d. Use the Power Protect helper.\" >&2
+echo \"$reason Use the Power Protect helper.\" >&2
 exit 1"
 
 end sudoersInstallCommand
@@ -138,7 +153,7 @@ end helperProgramExists
 on userIsAdmin()
 
 	try
-		do shell script quoted form of idPath & " -Gn | /usr/bin/grep -qw admin"
+		do shell script quoted form of idPath & " -Gn | /usr/bin/tr ' ' '\\n' | /usr/bin/grep -qx admin"
 		return true
 	on error
 		return false

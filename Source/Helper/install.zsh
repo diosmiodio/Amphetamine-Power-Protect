@@ -57,6 +57,16 @@ done
 /usr/bin/plutil -lint -s $SRC_DIR/$LABEL.plist || die "invalid plist: $SRC_DIR/$LABEL.plist"
 /bin/zsh -n $SRC_DIR/power-protect-helper.zsh || die "syntax error in power-protect-helper.zsh"
 
+# Check the scripts folder before anything changes. Root never follows a link that the user
+# controls. The Power Protect package can create the folder as root, and then the user cannot
+# write to it, so give it to the user (-h: do not follow a link).
+for p in "$SCRIPTS_DIR" "$SCRIPT_DEST" "$SCRIPT_DEST.orig"; do
+	[[ ! -L $p ]] || die "$p is a symbolic link. Remove it and try again."
+done
+if [[ -d $SCRIPTS_DIR && $(/usr/bin/stat -f %Su "$SCRIPTS_DIR") != $target_user ]]; then
+	/usr/sbin/chown -h $target_user "$SCRIPTS_DIR"
+fi
+
 # Compile the script first, so a compile error stops the install before anything changes.
 work_dir=$(/usr/bin/mktemp -d /tmp/amphetamine-power-protect.XXXXXX)
 trap '/bin/rm -rf "$work_dir"' EXIT
@@ -86,9 +96,6 @@ reply=$(as_user /bin/sh -c '/usr/bin/printf "status\n" | /usr/bin/nc -U -w 5 "$1
 print "Helper OK. SleepDisabled is ${reply#ok }."
 
 print "Installing powerProtect.scpt for $target_user..."
-for p in "$SCRIPTS_DIR" "$SCRIPT_DEST" "$SCRIPT_DEST.orig"; do
-	[[ ! -L $p ]] || die "$p is a symbolic link. Remove it and try again."
-done
 as_user /bin/mkdir -p "$SCRIPTS_DIR"
 # Keep the first original script, so uninstall.zsh --restore-script can put it back.
 if [[ -e $SCRIPT_DEST && ! -e $SCRIPT_DEST.orig ]]; then

@@ -44,7 +44,7 @@ standard account cannot use `sudo`. To install for a standard account, log in as
 user, open Terminal, and run the command with `su`:
 
 ```sh
-su ADMIN_NAME -c "sudo zsh $PWD/Source/Helper/install.zsh --user $USER"
+su ADMIN_NAME -c "sudo zsh '$PWD/Source/Helper/install.zsh' --user $USER"
 ```
 
 The script:

@@ -70,8 +70,12 @@ if (( restore_script )); then
 		failed=1
 	elif [[ -f $script_dest.orig ]]; then
 		# Run as the user, so that root never follows a link that the user controls.
-		/usr/bin/sudo -u $target_user -- /bin/mv -f "$script_dest.orig" "$script_dest"
-		print "Restored the backup of powerProtect.scpt."
+		if /usr/bin/sudo -u $target_user -- /bin/mv -f "$script_dest.orig" "$script_dest"; then
+			print "Restored the backup of powerProtect.scpt."
+		else
+			print -u2 -- "error: cannot restore $script_dest.orig"
+			failed=1
+		fi
 	else
 		print -u2 -- "error: no backup at $script_dest.orig"
 		failed=1

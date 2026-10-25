@@ -39,3 +39,11 @@ Amphetamine should now recognize that Power Protect is installed. If a Closed-Di
 ```
 /private/etc/sudoers.d/amphetamine_powerProtect
 ```
+
+<h4>If Power Protect shows "Power Protect Failure" again and again</h4>
+
+The sudoers rule does not work on some Macs, for example with a standard account, or when a management tool removes <code>/etc/sudoers.d</code>. The optional <a href="Source/Helper/README.md">Power Protect helper</a> changes the sleep setting without <code>sudo</code>:
+
+```
+sudo zsh Source/Helper/install.zsh
+```

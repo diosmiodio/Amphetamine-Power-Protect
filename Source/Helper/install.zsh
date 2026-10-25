@@ -63,6 +63,9 @@ done
 for p in "$SCRIPTS_DIR" "$SCRIPT_DEST" "$SCRIPT_DEST.orig"; do
 	[[ ! -L $p ]] || die "$p is a symbolic link. Remove it and try again."
 done
+# The checks above see only the last part of the path, so also refuse a link in a parent folder.
+[[ ${SCRIPTS_DIR:A} == "${SCRIPTS_DIR:h:h:h:A}/Library/Application Scripts/com.if.Amphetamine" ]] ||
+	die "a folder in $SCRIPTS_DIR is a symbolic link. Remove it and try again."
 if [[ -d $SCRIPTS_DIR && $(/usr/bin/stat -f %Su "$SCRIPTS_DIR") != $target_user ]]; then
 	/usr/sbin/chown -h $target_user "$SCRIPTS_DIR"
 fi

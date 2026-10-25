@@ -47,7 +47,7 @@ cat > $T/pmset <<EOF
 case "\$1" in
 	-g)
 		[ -f $T/fail-read ] && exit 1
-		printf 'System-wide power settings:\n sleep                1\n'
+		printf 'System-wide power settings:\n sleep                1 (sleep prevented by SleepDisabled, caffeinate)\n'
 		[ "\$(cat $T/state)" = 1 ] && printf ' SleepDisabled\t\t1\n'
 		exit 0 ;;
 	-a)
@@ -291,16 +291,16 @@ run_sudoers_install() {
 	as_call 'sudoersInstallCommand(sudoersRuleText("first.last"), "first.last")' "" $tree/sd/amphetamine_PowerProtect | sed \
 		-e "s|/usr/sbin/visudo -c -f /private/etc/sudoers|/usr/sbin/visudo -c -f $tree/main|" \
 		-e "s|/usr/bin/pmset -g|$T/pmset -g|" \
-		-e "s|/usr/bin/sudo -u \"\$user\" /usr/bin/sudo -n /usr/bin/pmset|$T/rule-check|" \
+		-e "s|/usr/bin/su \"\$user\" -c \"/usr/bin/sudo -n /usr/bin/pmset -a disablesleep \$current\"|$T/rule-check -a disablesleep \$current|" \
 		-e "s|-o root -g wheel ||" \
 		-e "s|/bin/mkdir -p /private/etc/sudoers.d|/bin/mkdir -p $tree/sd|" > $T/install-command.sh
-	if grep -nE '/private/etc|/usr/bin/sudo |/usr/bin/pmset -g' $T/install-command.sh; then
+	if grep -nE '/private/etc|/usr/bin/sudo |/usr/bin/su |/usr/bin/pmset -g' $T/install-command.sh; then
 		print -u2 "sudoers install test command still has a system path"
 		exit 1
 	fi
 	/bin/sh $T/install-command.sh >/dev/null 2>$T/install-command-err
 }
-# Stands in for "sudo -u USER sudo -n pmset ...": the rule applies unless $T/rule-denied exists.
+# Stands in for "su USER -c 'sudo -n pmset ...'": the rule applies unless $T/rule-denied exists.
 cat > $T/rule-check <<EOF
 #!/bin/sh
 echo "\$*" >> $T/rule-check-calls
@@ -352,7 +352,12 @@ check "sudoers install rolls back a file that breaks the configuration" no "$([[
 ME=$(/usr/bin/id -un)
 R=$T/root
 HOME_SCRIPTS="$T/home/Library/Application Scripts/com.if.Amphetamine"
-export TEST_SOCKET=$SOCK
+export TEST_SOCKET=$SOCK TEST_HOME=$T/home
+cat > $T/chown <<EOF
+#!/bin/sh
+echo "\$*" >> $T/chown-calls
+EOF
+chmod 755 $T/chown
 cat > $T/launchctl <<EOF
 #!/bin/sh
 echo "\$1" >> $T/launchctl-calls
@@ -371,10 +376,11 @@ dry_run_copy() {
 		-e "s|/usr/bin/pmset|$T/pmset|g" \
 		-e "s|-o root -g wheel ||g" \
 		-e "s|/usr/bin/sudo -u \$target_user --|/usr/bin/env|g" \
-		-e "s|\"\$user_home/Library/Application Scripts|\"$T/home/Library/Application Scripts|" \
+		-e "s|\"\$user_home/Library/Application Scripts|\"\${TEST_HOME}/Library/Application Scripts|g" \
+		-e "s|/usr/sbin/chown|$T/chown|g" \
 		$1 > $2
 	# Stop if any real system path is left, so a test can never change this Mac.
-	if grep -nE '(^|[^A-Za-z/])/(Library|var/run)/|/bin/launchctl|/usr/bin/sudo|EUID' $2; then
+	if grep -nE '(^|[ ="'\''])/(Library|var/run)/|/bin/launchctl|/usr/bin/sudo|/usr/sbin/chown|EUID' $2; then
 		print -u2 "dry run copy of ${1:t} still has a system path"
 		exit 1
 	fi
@@ -400,9 +406,23 @@ check "install says why" 1 "$(grep -c 'did not reply' $T/install-err)"
 
 mv "$HOME_SCRIPTS/powerProtect.scpt.orig" $T/orig-saved
 ln -s /tmp/pp-should-not-exist "$HOME_SCRIPTS/powerProtect.scpt.orig"
-TEST_SOCKET=$SOCK zsh $T/install-dry.zsh --user $ME >/dev/null 2>&1; check "install refuses a symbolic link" 1 $?
+rm -f $R/PrivilegedHelperTools/com.if.Amphetamine.PowerProtectHelper $R/LaunchDaemons/com.if.Amphetamine.PowerProtectHelper.plist
+zsh $T/install-dry.zsh --user $ME >/dev/null 2>&1; check "install refuses a symbolic link" 1 $?
 check "install did not write through the link" no "$([[ -e /tmp/pp-should-not-exist ]] && print yes || print no)"
+check "install refuses the link before it installs the helper" no "$([[ -e $R/PrivilegedHelperTools/com.if.Amphetamine.PowerProtectHelper ]] && print yes || print no)"
 rm -f "$HOME_SCRIPTS/powerProtect.scpt.orig"; mv $T/orig-saved "$HOME_SCRIPTS/powerProtect.scpt.orig"
+
+# A link in a parent folder: another home whose "Application Scripts" points to this one.
+mkdir -p $T/home2/Library
+ln -s "$T/home/Library/Application Scripts" "$T/home2/Library/Application Scripts"
+rm -f $T/chown-calls
+TEST_HOME=$T/home2 zsh $T/install-dry.zsh --user nobody >/dev/null 2>$T/install-err; check "install refuses a link in a parent folder" 1 $?
+check "install does not chown through a parent link" no "$([[ -f $T/chown-calls ]] && print yes || print no)"
+
+# The package can create the scripts folder as root. The installer gives it to the user.
+# (--user nobody: the folder belongs to $ME here, so the owners differ.)
+zsh $T/install-dry.zsh --user nobody >/dev/null 2>$T/install-err; check "install for another user" 0 $?
+check "install gives the scripts folder to the user" "-h nobody $HOME_SCRIPTS" "$(cat $T/chown-calls 2>/dev/null)"
 
 zsh $T/install-dry.zsh --user no_such_user_pp >/dev/null 2>$T/install-err; check "install rejects an unknown user" 1 $?
 check "install says the user is unknown" 1 "$(grep -c 'no such user' $T/install-err)"
@@ -415,6 +435,12 @@ check "uninstall turns normal sleep back on" 0 "$(cat $T/state)"
 check "uninstall restores the original script" upstream "$(cat "$HOME_SCRIPTS/powerProtect.scpt")"
 zsh $T/uninstall-dry.zsh --restore-script --user $ME >/dev/null 2>$T/uninstall-err; check "uninstall --restore-script fails with no backup" 1 $?
 check "uninstall says there is no backup" 1 "$(grep -c 'no backup at' $T/uninstall-err)"
+
+print -r -- upstream > "$HOME_SCRIPTS/powerProtect.scpt.orig"
+chmod 0555 "$HOME_SCRIPTS"
+zsh $T/uninstall-dry.zsh --restore-script --user $ME >/dev/null 2>$T/uninstall-err; check "uninstall reports a failed restore" 1 $?
+check "uninstall says the restore failed" 1 "$(grep -c 'cannot restore' $T/uninstall-err)"
+chmod 0755 "$HOME_SCRIPTS"
 
 print
 print "$pass passed, $fail failed"

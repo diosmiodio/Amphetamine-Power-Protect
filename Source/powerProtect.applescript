@@ -83,6 +83,8 @@ end powerProtectSudoFileExists
 --    PLAIN "visudo -c" DOES ON EVERY FILE: SUDO ACCEPTS ROOT-OWNED 0644 FILES THAT OTHER TOOLS INSTALL
 -- 4. RUN THE REAL COMMAND AS THE USER WITH THE CURRENT VALUE, SO NOTHING CHANGES. A LATER SUDOERS
 --    ENTRY CAN STILL ASK FOR A PASSWORD, BECAUSE THE LAST MATCHING ENTRY WINS
+--    USE su, NOT "sudo -u": THE SUDOERS POLICY CAN DENY ROOT, BUT su FROM ROOT NEEDS NO POLICY
+-- AWK MATCHES THE FIRST FIELD ONLY: OTHER pmset LINES LIST PROCESS NAMES, WHICH ANY USER CAN CHOOSE
 -- IF A CHECK FAILS, PUT BACK THE OLD FILE. A SUDOERS FILE WITH BAD SYNTAX CAN STOP SUDO FROM WORKING
 on sudoersInstallCommand(ruleText, userName)
 
@@ -99,10 +101,10 @@ if [ -f \"$dest\" ]; then /bin/cp -p \"$dest\" \"$work/previous\"; fi
 reason=\"sudo does not read $dest. /etc/sudoers may not include /etc/sudoers.d.\"
 if parsed=$(/usr/sbin/visudo -c -f /private/etc/sudoers 2>&1); then
 	if /usr/bin/printf '%s\\n' \"$parsed\" | /usr/bin/grep -qF \"${dest##*/}: parsed OK\"; then
-		current=$(/usr/bin/pmset -g | /usr/bin/awk '/SleepDisabled/ { print $2; exit }')
+		current=$(/usr/bin/pmset -g | /usr/bin/awk '$1 == \"SleepDisabled\" { print $2; exit }')
 		[ \"$current\" = 1 ] || current=0
-		if /usr/bin/sudo -u \"$user\" /usr/bin/sudo -n /usr/bin/pmset -a disablesleep \"$current\" 2>/dev/null; then exit 0; fi
-		reason=\"the rule does not apply to $user. Another sudoers entry may ask for a password.\"
+		if checked=$(/usr/bin/su \"$user\" -c \"/usr/bin/sudo -n /usr/bin/pmset -a disablesleep $current\" 2>&1 </dev/null); then exit 0; fi
+		reason=\"the rule does not apply to $user ($checked). Another sudoers entry may ask for a password.\"
 	fi
 else
 	reason=\"the sudoers configuration does not parse: $parsed\"
@@ -118,7 +120,7 @@ end sudoersInstallCommand
 on sleepDisabledState()
 
 	try
-		set pmsetResult to do shell script "settings=$(" & quoted form of pmsetPath & " -g) || exit 1; /usr/bin/printf '%s\\n' \"$settings\" | /usr/bin/awk '/SleepDisabled/ { print $2; exit }'"
+		set pmsetResult to do shell script "settings=$(" & quoted form of pmsetPath & " -g) || exit 1; /usr/bin/printf '%s\\n' \"$settings\" | /usr/bin/awk '$1 == \"SleepDisabled\" { print $2; exit }'"
 	on error
 		return "unknown"
 	end try

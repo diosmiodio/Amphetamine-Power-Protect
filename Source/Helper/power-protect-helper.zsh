@@ -29,10 +29,11 @@ reply() {
 }
 
 # Print the current SleepDisabled value (0 or 1). pmset does not show the key when it is 0.
+# Match the first field only: other lines list process names, which any user can choose.
 sleep_disabled() {
 	local settings value
 	settings=$($PMSET -g 2>/dev/null) || return 1
-	value=$(print -r -- "$settings" | /usr/bin/awk '/SleepDisabled/ { print $2; exit }')
+	value=$(print -r -- "$settings" | /usr/bin/awk '$1 == "SleepDisabled" { print $2; exit }')
 	if [[ $value == 1 ]]; then
 		print 1
 	else
